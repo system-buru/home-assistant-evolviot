@@ -35,7 +35,7 @@ During setup, provide:
 - API base URL
 - SSL verification preference
 
-Home Assistant then starts a short-lived pairing session. The user scans the QR code with the EvolvIOT app, or enters the pairing code manually in the app. After the app approves the pairing, Home Assistant exchanges the device code for access and refresh tokens.
+Home Assistant then starts a short-lived pairing session. The user scans the QR code with the EvolvIOT app, or enters the pairing code manually in the app. Home Assistant polls automatically until the app approves the pairing or the user denies it. If the pairing code expires before approval, Home Assistant automatically requests a fresh code and QR payload.
 
 Do not hardcode OAuth client secrets in this public repository. The app-based device-code flow does not require a public HACS integration to ship a client secret.
 
@@ -74,6 +74,8 @@ Response:
   "interval": 5
 }
 ```
+
+`expires_in` defaults to 600 seconds on the backend unless `HOME_ASSISTANT_DEVICE_AUTH_EXPIRES_IN_SECONDS` is set. `interval` defaults to 5 seconds unless `HOME_ASSISTANT_DEVICE_AUTH_POLL_INTERVAL_SECONDS` is set.
 
 Approve from logged-in EvolvIOT app:
 
