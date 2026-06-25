@@ -1,0 +1,6 @@
+{
+  "name": "EvolvIOT",
+  "render_readme": true,
+  "domains": ["evolviot"],
+  "homeassistant": "2024.6.0"
+}
