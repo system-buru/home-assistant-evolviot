@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import time
 from typing import Any
-from urllib.parse import quote
 
 import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.core import callback
+from homeassistant.data_entry_flow import UnknownFlow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import selector
 
 from .api import (
     EvolvIOTApi,
@@ -48,6 +50,22 @@ def _connection_schema(user_input: dict[str, Any] | None = None) -> vol.Schema:
 
 def _retry_schema() -> vol.Schema:
     return vol.Schema({vol.Required("retry", default=True): bool})
+
+
+def _pair_schema(qr_payload: str) -> vol.Schema:
+    return vol.Schema(
+        {
+            vol.Optional("pairing_qr"): selector(
+                {
+                    "qr_code": {
+                        "data": qr_payload,
+                        "scale": 5,
+                        "error_correction_level": "quartile",
+                    }
+                }
+            )
+        }
+    )
 
 
 class EvolvIOTConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -101,16 +119,21 @@ class EvolvIOTConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ):
         """Show pairing details while polling for app approval."""
+        errors: dict[str, str] = {}
+
         if not self._pairing:
             return await self.async_step_user()
 
         if self._poll_task is not None and self._poll_task.done():
-            return self.async_show_progress_done(next_step_id="pair_done")
+            return await self.async_step_pair_done()
 
-        return self.async_show_progress(
+        if user_input is not None:
+            errors["base"] = "authorization_pending"
+
+        return self.async_show_form(
             step_id="pair",
-            progress_action="pair",
-            progress_task=self._poll_task,
+            data_schema=_pair_schema(self._pairing_qr_payload()),
+            errors=errors,
             description_placeholders=self._pair_description_placeholders(),
         )
 
@@ -189,22 +212,29 @@ class EvolvIOTConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Start a fresh pairing session and polling task."""
         self._pairing = await self._api().async_start_device_authorization()
         self._poll_task = self.hass.async_create_task(self._async_poll_pairing())
+        self._poll_task.add_done_callback(self._pairing_poll_done)
 
-    def _pair_description_placeholders(self) -> dict[str, str]:
-        """Return placeholders shown in the pairing progress step."""
-        qr_payload = str(
+    def _pairing_poll_done(self, _task: asyncio.Task[dict[str, Any]]) -> None:
+        """Advance the config flow when background pairing finishes."""
+
+        async def _finish_pairing() -> None:
+            with suppress(UnknownFlow):
+                await self.hass.config_entries.flow.async_configure(self.flow_id)
+                self.async_notify_flow_changed()
+
+        self.hass.async_create_task(_finish_pairing())
+
+    def _pairing_qr_payload(self) -> str:
+        """Return the payload encoded into the displayed QR code."""
+        return str(
             self._pairing.get("qr_payload")
             or self._pairing.get("verification_uri_complete")
             or self._pairing.get("user_code")
             or ""
         )
-        qr_image_url = (
-            "https://api.qrserver.com/v1/create-qr-code/?size=240x240&data="
-            f"{quote(qr_payload)}"
-            if qr_payload
-            else ""
-        )
 
+    def _pair_description_placeholders(self) -> dict[str, str]:
+        """Return placeholders shown in the pairing progress step."""
         return {
             "user_code": str(self._pairing.get("user_code") or ""),
             "verification_uri": str(
@@ -212,7 +242,7 @@ class EvolvIOTConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 or self._pairing.get("verification_uri")
                 or ""
             ),
-            "qr_image_url": qr_image_url,
+            "qr_payload": self._pairing_qr_payload(),
             "expires_in": str(self._pairing.get("expires_in") or ""),
         }
 
