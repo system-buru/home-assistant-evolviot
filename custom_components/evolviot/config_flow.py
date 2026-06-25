@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-import time
 from typing import Any
+from urllib.parse import quote
 
 import voluptuous as vol
 
@@ -13,7 +13,6 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import UnknownFlow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.selector import selector
 
 from .api import (
     EvolvIOTApi,
@@ -52,20 +51,8 @@ def _retry_schema() -> vol.Schema:
     return vol.Schema({vol.Required("retry", default=True): bool})
 
 
-def _pair_schema(qr_payload: str) -> vol.Schema:
-    return vol.Schema(
-        {
-            vol.Optional("pairing_qr"): selector(
-                {
-                    "qr_code": {
-                        "data": qr_payload,
-                        "scale": 5,
-                        "error_correction_level": "quartile",
-                    }
-                }
-            )
-        }
-    )
+def _pair_schema() -> vol.Schema:
+    return vol.Schema({vol.Required("approved", default=True): bool})
 
 
 class EvolvIOTConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -77,7 +64,7 @@ class EvolvIOTConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._api_base_url = DEFAULT_API_BASE_URL
         self._verify_ssl = True
         self._pairing: dict[str, Any] = {}
-        self._poll_task: asyncio.Task[dict[str, Any]] | None = None
+        self._refresh_task: asyncio.Task[None] | None = None
 
     def _api(self) -> EvolvIOTApi:
         session = async_get_clientsession(self.hass, verify_ssl=self._verify_ssl)
@@ -124,117 +111,136 @@ class EvolvIOTConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if not self._pairing:
             return await self.async_step_user()
 
-        if self._poll_task is not None and self._poll_task.done():
-            return await self.async_step_pair_done()
-
         if user_input is not None:
-            errors["base"] = "authorization_pending"
+            if not user_input.get("approved"):
+                errors["base"] = "authorization_pending"
+            else:
+                device_code = str(self._pairing["device_code"])
+                try:
+                    token_data = await self._api().async_exchange_device_code(
+                        device_code
+                    )
+                    access_token = str(token_data.get("access_token") or "").strip()
+                    refresh_token = str(token_data.get("refresh_token") or "").strip()
+                    api = EvolvIOTApi(
+                        async_get_clientsession(self.hass, verify_ssl=self._verify_ssl),
+                        self._api_base_url,
+                        access_token,
+                        refresh_token=refresh_token,
+                        verify_ssl=self._verify_ssl,
+                    )
+                    payload = await api.async_validate()
+                except EvolvIOTDeviceAuthorizationPending:
+                    errors["base"] = "authorization_pending"
+                except EvolvIOTDeviceAuthorizationExpired:
+                    return await self._async_refresh_pairing("authorization_expired")
+                except EvolvIOTDeviceAuthorizationDenied:
+                    return await self._async_refresh_pairing("authorization_denied")
+                except EvolvIOTAuthError:
+                    return await self._async_refresh_pairing("invalid_auth")
+                except EvolvIOTConnectionError:
+                    errors["base"] = "cannot_connect"
+                except Exception:
+                    errors["base"] = "unknown"
+                else:
+                    self._cancel_pairing_refresh()
+                    unique_id = str(payload.get("user_id") or self._api_base_url)
+                    await self.async_set_unique_id(unique_id)
+                    self._abort_if_unique_id_configured()
+                    return self.async_create_entry(
+                        title=NAME,
+                        data={
+                            CONF_API_BASE_URL: self._api_base_url,
+                            CONF_ACCESS_TOKEN: access_token,
+                            CONF_REFRESH_TOKEN: refresh_token,
+                            CONF_VERIFY_SSL: self._verify_ssl,
+                        },
+                    )
 
         return self.async_show_form(
             step_id="pair",
-            data_schema=_pair_schema(self._pairing_qr_payload()),
+            data_schema=_pair_schema(),
             errors=errors,
             description_placeholders=self._pair_description_placeholders(),
         )
 
-    async def async_step_pair_done(
-        self, user_input: dict[str, Any] | None = None
-    ):
-        """Finish pairing after polling completes."""
-        if self._poll_task is None:
-            return await self.async_step_user()
-
-        try:
-            result = self._poll_task.result()
-        except EvolvIOTDeviceAuthorizationExpired:
-            try:
-                await self._async_start_pairing()
-            except EvolvIOTConnectionError:
-                return self._restart_with_error("cannot_connect")
-            except Exception:
-                return self._restart_with_error("unknown")
-            return await self.async_step_pair()
-        except EvolvIOTDeviceAuthorizationDenied:
-            return self._restart_with_error("authorization_denied")
-        except EvolvIOTAuthError:
-            return self._restart_with_error("invalid_auth")
-        except EvolvIOTConnectionError:
-            return self._restart_with_error("cannot_connect")
-        except Exception:
-            return self._restart_with_error("unknown")
-
-        unique_id = str(result["payload"].get("user_id") or self._api_base_url)
-        await self.async_set_unique_id(unique_id)
-        self._abort_if_unique_id_configured()
-        return self.async_create_entry(
-            title=NAME,
-            data={
-                CONF_API_BASE_URL: self._api_base_url,
-                CONF_ACCESS_TOKEN: result["access_token"],
-                CONF_REFRESH_TOKEN: result["refresh_token"],
-                CONF_VERIFY_SSL: self._verify_ssl,
-            },
+    async def _async_start_pairing(self) -> None:
+        """Start a fresh pairing session."""
+        self._cancel_pairing_refresh()
+        self._pairing = await self._api().async_start_device_authorization()
+        self._refresh_task = self.hass.async_create_task(
+            self._async_refresh_pairing_on_expiry()
         )
 
-    async def _async_poll_pairing(self) -> dict[str, Any]:
-        """Poll EvolvIOT until the app approves pairing or the code expires."""
+    def _cancel_pairing_refresh(self) -> None:
+        """Cancel the passive expiry refresh task."""
+        current_task = asyncio.current_task()
+        if (
+            self._refresh_task is not None
+            and self._refresh_task is not current_task
+            and not self._refresh_task.done()
+        ):
+            self._refresh_task.cancel()
+        if self._refresh_task is not current_task:
+            self._refresh_task = None
+
+    async def _async_refresh_pairing_on_expiry(self) -> None:
+        """Refresh the QR/code when the current pairing session expires."""
         expires_in = max(1, int(self._pairing.get("expires_in") or 600))
-        interval = max(1, int(self._pairing.get("interval") or 5))
-        deadline = time.monotonic() + expires_in
-        device_code = str(self._pairing["device_code"])
-
-        while time.monotonic() < deadline:
-            try:
-                token_data = await self._api().async_exchange_device_code(
-                    device_code
-                )
-                access_token = str(token_data.get("access_token") or "").strip()
-                refresh_token = str(token_data.get("refresh_token") or "").strip()
-                api = EvolvIOTApi(
-                    async_get_clientsession(self.hass, verify_ssl=self._verify_ssl),
-                    self._api_base_url,
-                    access_token,
-                    refresh_token=refresh_token,
-                    verify_ssl=self._verify_ssl,
-                )
-                payload = await api.async_validate()
-                return {
-                    "access_token": access_token,
-                    "refresh_token": refresh_token,
-                    "payload": payload,
-                }
-            except EvolvIOTDeviceAuthorizationPending:
-                await asyncio.sleep(min(interval, max(0, deadline - time.monotonic())))
-
-        raise EvolvIOTDeviceAuthorizationExpired("Pairing expired")
-
-    async def _async_start_pairing(self) -> None:
-        """Start a fresh pairing session and polling task."""
-        self._pairing = await self._api().async_start_device_authorization()
-        self._poll_task = self.hass.async_create_task(self._async_poll_pairing())
-        self._poll_task.add_done_callback(self._pairing_poll_done)
-
-    def _pairing_poll_done(self, _task: asyncio.Task[dict[str, Any]]) -> None:
-        """Advance the config flow when background pairing finishes."""
-
-        async def _finish_pairing() -> None:
+        try:
+            await asyncio.sleep(expires_in)
+            await self._async_start_pairing()
             with suppress(UnknownFlow):
                 await self.hass.config_entries.flow.async_configure(self.flow_id)
                 self.async_notify_flow_changed()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._pairing = {}
 
-        self.hass.async_create_task(_finish_pairing())
+    async def _async_refresh_pairing(self, error: str):
+        """Replace the expired/invalid pairing session with a fresh one."""
+        try:
+            await self._async_start_pairing()
+        except EvolvIOTConnectionError:
+            self._pairing = {}
+            return self.async_show_form(
+                step_id="user",
+                data_schema=_retry_schema(),
+                errors={"base": "cannot_connect"},
+            )
+        except Exception:
+            self._pairing = {}
+            return self.async_show_form(
+                step_id="user",
+                data_schema=_retry_schema(),
+                errors={"base": "unknown"},
+            )
+        else:
+            errors = {"base": error}
 
-    def _pairing_qr_payload(self) -> str:
-        """Return the payload encoded into the displayed QR code."""
-        return str(
+        return self.async_show_form(
+            step_id="pair",
+            data_schema=_pair_schema(),
+            errors=errors,
+            description_placeholders=self._pair_description_placeholders(),
+        )
+
+    def _pair_description_placeholders(self) -> dict[str, str]:
+        """Return placeholders shown in the pairing form step."""
+        qr_payload = str(
             self._pairing.get("qr_payload")
             or self._pairing.get("verification_uri_complete")
             or self._pairing.get("user_code")
             or ""
         )
+        qr_image_url = (
+            "https://api.qrserver.com/v1/create-qr-code/?size=240x240&data="
+            f"{quote(qr_payload)}"
+            if qr_payload
+            else ""
+        )
 
-    def _pair_description_placeholders(self) -> dict[str, str]:
-        """Return placeholders shown in the pairing progress step."""
         return {
             "user_code": str(self._pairing.get("user_code") or ""),
             "verification_uri": str(
@@ -242,19 +248,9 @@ class EvolvIOTConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 or self._pairing.get("verification_uri")
                 or ""
             ),
-            "qr_payload": self._pairing_qr_payload(),
+            "qr_image_url": qr_image_url,
             "expires_in": str(self._pairing.get("expires_in") or ""),
         }
-
-    def _restart_with_error(self, error: str):
-        """Reset pairing state and show the first step with an error."""
-        self._pairing = {}
-        self._poll_task = None
-        return self.async_show_form(
-            step_id="user",
-            data_schema=_retry_schema(),
-            errors={"base": error},
-        )
 
     @staticmethod
     @callback

@@ -10,9 +10,9 @@
       },
       "pair": {
         "title": "Approve in the EvolvIOT app",
-        "description": "Scan the QR code below in the EvolvIOT app, or enter pairing code `{user_code}` manually.\n\nHome Assistant is polling automatically and will finish setup after approval. This code expires in {expires_in} seconds.",
+        "description": "![EvolvIOT pairing QR]({qr_image_url})\n\nPairing code: `{user_code}`\n\nScan the QR code in the EvolvIOT app, or enter the pairing code manually. After the app shows success, keep the checkbox enabled and select Submit to continue.",
         "data": {
-          "pairing_qr": "Pairing QR code"
+          "approved": "The EvolvIOT app shows pairing success"
         }
       }
     },
@@ -21,8 +21,8 @@
     },
     "error": {
       "authorization_denied": "Pairing was denied in the EvolvIOT app.",
-      "authorization_expired": "Pairing expired. Start setup again.",
-      "authorization_pending": "Pairing is not approved yet. Approve it in the EvolvIOT app.",
+      "authorization_expired": "The previous pairing session expired. A new QR code and pairing code have been generated.",
+      "authorization_pending": "Pairing is not approved yet. Scan the QR code or enter the pairing code in the EvolvIOT app, then submit again.",
       "cannot_connect": "Failed to connect to EvolvIOT.",
       "invalid_auth": "Invalid EvolvIOT credentials.",
       "unknown": "Unexpected error."
