@@ -9,7 +9,7 @@ from homeassistant.const import Platform
 DOMAIN = "evolviot"
 NAME = "EvolvIOT"
 
-DEFAULT_API_BASE_URL = "https://testapi.evolviot.com/api/homeassistant"
+DEFAULT_API_BASE_URL = "https://api.evolviot.com/api/homeassistant"
 DEFAULT_SCAN_INTERVAL = timedelta(seconds=15)
 
 CONF_ACCESS_TOKEN = "access_token"
