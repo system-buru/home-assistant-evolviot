@@ -46,6 +46,10 @@ def _connection_schema(user_input: dict[str, Any] | None = None) -> vol.Schema:
     )
 
 
+def _retry_schema() -> vol.Schema:
+    return vol.Schema({vol.Required("retry", default=True): bool})
+
+
 class EvolvIOTConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle an EvolvIOT config flow."""
 
@@ -68,32 +72,30 @@ class EvolvIOTConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ):
-        """Start app-based pairing."""
+        """Start app-based pairing immediately."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            self._api_base_url = normalize_api_base_url(user_input[CONF_API_BASE_URL])
-            self._verify_ssl = bool(user_input.get(CONF_VERIFY_SSL, True))
+            self._api_base_url = normalize_api_base_url(
+                user_input.get(CONF_API_BASE_URL, self._api_base_url)
+            )
+            self._verify_ssl = bool(user_input.get(CONF_VERIFY_SSL, self._verify_ssl))
 
-            try:
-                await self._async_start_pairing()
-            except EvolvIOTConnectionError:
-                errors["base"] = "cannot_connect"
-            except Exception:
-                errors["base"] = "unknown"
-                return self.async_show_form(
-                    step_id="user",
-                    data_schema=_connection_schema(user_input),
-                    errors=errors,
-                )
+        try:
+            await self._async_start_pairing()
+        except EvolvIOTConnectionError:
+            errors["base"] = "cannot_connect"
+        except Exception:
+            errors["base"] = "unknown"
 
-            return await self.async_step_pair()
+        if errors:
+            return self.async_show_form(
+                step_id="user",
+                data_schema=_retry_schema(),
+                errors=errors,
+            )
 
-        return self.async_show_form(
-            step_id="user",
-            data_schema=_connection_schema(user_input),
-            errors=errors,
-        )
+        return await self.async_step_pair()
 
     async def async_step_pair(
         self, user_input: dict[str, Any] | None = None
@@ -220,12 +222,7 @@ class EvolvIOTConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._poll_task = None
         return self.async_show_form(
             step_id="user",
-            data_schema=_connection_schema(
-                {
-                    CONF_API_BASE_URL: self._api_base_url,
-                    CONF_VERIFY_SSL: self._verify_ssl,
-                }
-            ),
+            data_schema=_retry_schema(),
             errors={"base": error},
         )
 

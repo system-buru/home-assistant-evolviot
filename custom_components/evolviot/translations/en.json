@@ -3,10 +3,9 @@
     "step": {
       "user": {
         "title": "Connect EvolvIOT",
-        "description": "Start pairing with the EvolvIOT app.",
+        "description": "Home Assistant could not start EvolvIOT pairing. Check the EvolvIOT backend connection and retry.",
         "data": {
-          "api_base_url": "API base URL",
-          "verify_ssl": "Verify SSL certificate"
+          "retry": "Retry pairing"
         }
       },
       "pair": {
@@ -15,7 +14,7 @@
       }
     },
     "progress": {
-      "pair": "Waiting for EvolvIOT app approval."
+      "pair": "Scan this QR code in the EvolvIOT app, or enter the pairing code manually.\n\n<p align=\"center\"><img src=\"{qr_image_url}\" alt=\"EvolvIOT pairing QR\" width=\"240\" height=\"240\"></p>\n\n<p align=\"center\"><strong>Pairing code</strong><br><code>{user_code}</code></p>\n\nThis code expires in {expires_in} seconds. Home Assistant is polling automatically and will refresh the QR code if it expires before approval."
     },
     "error": {
       "authorization_denied": "Pairing was denied in the EvolvIOT app.",
