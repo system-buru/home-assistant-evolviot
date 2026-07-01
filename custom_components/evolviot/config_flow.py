@@ -8,7 +8,6 @@ from contextlib import suppress
 from io import BytesIO
 from typing import Any
 
-from PIL import Image
 import qrcode
 import voluptuous as vol
 
@@ -36,9 +35,6 @@ from .const import (
     NAME,
 )
 
-QR_CANVAS_WIDTH = 520
-
-
 def _connection_schema(user_input: dict[str, Any] | None = None) -> vol.Schema:
     values = user_input or {}
     return vol.Schema(
@@ -65,10 +61,7 @@ def _qr_code_data_uri(payload: str) -> str:
     if not payload:
         return ""
 
-    qr_image = qrcode.make(payload, border=2).convert("RGBA")
-    canvas_width = max(QR_CANVAS_WIDTH, qr_image.width)
-    image = Image.new("RGBA", (canvas_width, qr_image.height), (255, 255, 255, 0))
-    image.paste(qr_image, ((canvas_width - qr_image.width) // 2, 0))
+    image = qrcode.make(payload, border=2)
     buffer = BytesIO()
     image.save(buffer, format="PNG")
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
