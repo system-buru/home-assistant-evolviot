@@ -7,5 +7,5 @@
   "codeowners": ["@system-buru"],
   "config_flow": true,
   "iot_class": "cloud_polling",
-  "requirements": []
+  "requirements": ["qrcode[pil]==8.2"]
 }

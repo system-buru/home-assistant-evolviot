@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from contextlib import suppress
+from io import BytesIO
 from typing import Any
-from urllib.parse import quote
 
+import qrcode
 import voluptuous as vol
 
 from homeassistant import config_entries
@@ -53,6 +55,18 @@ def _retry_schema() -> vol.Schema:
 
 def _pair_schema() -> vol.Schema:
     return vol.Schema({vol.Required("approved", default=True): bool})
+
+
+def _qr_code_data_uri(payload: str) -> str:
+    """Return an embedded QR code image for the pairing payload."""
+    if not payload:
+        return ""
+
+    image = qrcode.make(payload, border=2)
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
 
 
 class EvolvIOTConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -234,21 +248,15 @@ class EvolvIOTConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             or self._pairing.get("user_code")
             or ""
         )
-        qr_image_url = (
-            "https://api.qrserver.com/v1/create-qr-code/?size=240x240&data="
-            f"{quote(qr_payload)}"
-            if qr_payload
-            else ""
-        )
 
         return {
+            "qr_image_url": _qr_code_data_uri(qr_payload),
             "user_code": str(self._pairing.get("user_code") or ""),
             "verification_uri": str(
                 self._pairing.get("verification_uri_complete")
                 or self._pairing.get("verification_uri")
                 or ""
             ),
-            "qr_image_url": qr_image_url,
             "expires_in": str(self._pairing.get("expires_in") or ""),
         }
 
