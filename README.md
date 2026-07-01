@@ -1,41 +1,20 @@
 # EvolvIOT Home Assistant Integration
 
-Custom Home Assistant integration for EvolvIOT smart home devices.
+Use EvolvIOT smart home devices in Home Assistant.
 
-This repository is structured for HACS:
+## Installation
 
-```text
-custom_components/evolviot/
-hacs.json
-README.md
-```
-
-HACS requires one integration under `custom_components/`, with the required integration files inside that directory. The integration includes a local `icon.png`, but Home Assistant's **Add integration** picker can still show `icon not available` until the EvolvIOT brand assets are published through the Home Assistant brands service.
-
-## Install With HACS
-
-1. Open HACS in Home Assistant.
+1. Open **HACS** in Home Assistant.
 2. Add this repository as a custom repository.
-3. Choose the `Integration` category.
-4. Install `EvolvIOT`.
+3. Choose the **Integration** category.
+4. Install **EvolvIOT**.
 5. Restart Home Assistant.
-6. Go to **Settings > Devices & services > Add integration > EvolvIOT**.
+6. Go to **Settings > Devices & services > Add integration**.
+7. Search for **EvolvIOT** and start setup.
 
-## Configuration
+## Setup
 
-By default, the integration talks to the EvolvIOT Home Assistant route:
-
-```text
-https://api.evolviot.com/api/homeassistant
-```
-
-It checks backend reachability with:
-
-```text
-https://api.evolviot.com/health
-```
-
-During setup, Home Assistant starts a short-lived pairing session and shows a QR code plus a pairing code.
+During setup, Home Assistant shows a QR code and a pairing code.
 
 In the EvolvIOT app:
 
@@ -46,51 +25,43 @@ In the EvolvIOT app:
 5. Scan the QR code shown in Home Assistant.
 6. After the app shows success, select **Submit** in Home Assistant.
 
-If the pairing code expires before approval, Home Assistant requests a fresh code and QR payload. If Home Assistant says the account is already configured, remove the existing EvolvIOT integration from **Settings > Devices & services** before adding it again.
+If the pairing code expires, Home Assistant will generate a new QR code and pairing code.
 
-## Security Notes
+## Supported Devices
 
-- Pairing QR codes are generated locally inside Home Assistant and embedded in the setup dialog. The pairing payload is not sent to a third-party QR service.
-- Access and refresh tokens are stored in the Home Assistant config entry, which is the normal storage path for Home Assistant integrations.
-- Avoid disabling SSL verification except in a controlled local development environment.
+The integration supports EvolvIOT entities exposed as:
 
-## Backend Routes Used
+- Switches
+- Lights
+- Fans
+- Sensors
+- Binary sensors
 
-The Home Assistant integration calls this backend health route:
+Brightness and fan speed are available when supported by the connected device.
 
-- `GET /health`
+## Troubleshooting
 
-It also calls these routes under `/api/homeassistant`:
+### Account Already Configured
 
-- `POST /device/authorize`
-- `POST /oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:device_code`
-- `POST /oauth/token` with `grant_type=refresh_token`
-- `GET /devices`
-- `GET /devices/states`
-- `GET /devices/:entityId/state`
-- `POST /devices/:entityId/command`
+Home Assistant only allows one setup entry for the same EvolvIOT account.
 
-## Supported Entities
+To pair again, remove the existing EvolvIOT integration from **Settings > Devices & services**, then add it again.
 
-EvolvIOT backend entity domains are mapped to Home Assistant platforms:
+### Icon Not Available
 
-- `switch`
-- `light`
-- `fan`
-- `sensor`
-- `binary_sensor`
+Home Assistant may show `icon not available` in the integration picker until EvolvIOT brand assets are available through Home Assistant's brands service. This does not affect pairing or device control.
 
-Brightness and fan speed are supported when the backend returns the corresponding capability flags.
+### Cannot Connect
 
-## Publishing Updates
+Check that:
 
-For HACS users, publish GitHub releases such as:
+- Home Assistant has internet access.
+- The EvolvIOT service is reachable.
+- SSL verification is enabled unless you are using a controlled local test environment.
 
-- `v1.0.0`
-- `v1.0.1`
+## Security
 
-HACS can use the default branch without releases, but releases provide a cleaner update experience.
-
-## References
-
-- HACS integration publishing: https://www.hacs.xyz/docs/publish/integration/
+- The QR code is generated locally inside Home Assistant.
+- The pairing payload is not sent to a third-party QR service.
+- Authentication data is stored by Home Assistant for this integration.
+- Do not share screenshots that show a valid QR code or pairing code.

@@ -243,21 +243,9 @@ class EvolvIOTConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def _pair_description_placeholders(self) -> dict[str, str]:
         """Return placeholders shown in the pairing form step."""
-        qr_payload = str(
-            self._pairing.get("qr_payload")
-            or self._pairing.get("verification_uri_complete")
-            or self._pairing.get("user_code")
-            or ""
-        )
-
         return {
-            "qr_image_url": _qr_code_data_uri(qr_payload),
+            "qr_image_url": _qr_code_data_uri(str(self._pairing.get("qr_payload") or "")),
             "user_code": str(self._pairing.get("user_code") or ""),
-            "verification_uri": str(
-                self._pairing.get("verification_uri_complete")
-                or self._pairing.get("verification_uri")
-                or ""
-            ),
             "expires_in": str(self._pairing.get("expires_in") or ""),
         }
 
