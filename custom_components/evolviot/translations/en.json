@@ -9,8 +9,8 @@
         }
       },
       "pair": {
-        "title": "Approve in the EvolvIOT app",
-        "description": "| ![EvolvIOT pairing QR]({qr_image_url}) |\n|:--:|\n\nPairing code: `{user_code}`\n\nScan the QR code in the EvolvIOT app. After the app shows success, select Submit."
+        "title": "Scan the code from EvolvIOT app",
+        "description": "| ![EvolvIOT pairing QR]({qr_image_url}) |\n|:--:|\n\nPairing code: `{user_code}`\n\nⓘ Profile → Third party services → Home Assistant → Scan QR. After the app shows success, select Submit."
       }
     },
     "progress": {
