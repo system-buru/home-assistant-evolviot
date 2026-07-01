@@ -50,11 +50,11 @@ class EvolvIOTEntity(CoordinatorEntity[EvolvIOTDataUpdateCoordinator]):
 
     @property
     def available(self) -> bool:
-        """Return availability from the backend."""
+        """Return availability from cloud or local device reachability."""
         state = self.backend_state
         if not state:
             return False
-        return bool(state.get("available", True))
+        return bool(state.get("available", True) or state.get("local_available"))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

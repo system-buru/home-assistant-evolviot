@@ -10,6 +10,7 @@ import hmac
 import json
 import os
 import re
+import time
 from typing import Any
 from urllib.parse import quote
 
@@ -109,6 +110,24 @@ def _sign_local_payload(
         hashlib.sha256,
     ).digest()
     return base64.b64encode(signature).decode("ascii")
+
+
+def _local_status_headers(uid: str, device_id: str, device_secret: str) -> dict[str, str]:
+    """Build signed local status headers matching the EvolvIOT app."""
+    timestamp = str(int(time.time()))
+    nonce = base64.urlsafe_b64encode(os.urandom(12)).decode("ascii").rstrip("=")
+    canonical = f"GET\n/status\n{timestamp}\n{nonce}\n{device_id}"
+    _, hmac_key = _derive_local_keys(device_secret, uid, device_id)
+    signature = hmac.new(
+        hmac_key,
+        canonical.encode(),
+        hashlib.sha256,
+    ).digest()
+    return {
+        "X-Evolv-Timestamp": timestamp,
+        "X-Evolv-Nonce": nonce,
+        "X-Evolv-Signature": base64.b64encode(signature).decode("ascii"),
+    }
 
 
 class EvolvIOTApi:
@@ -304,6 +323,36 @@ class EvolvIOTApi:
             ) as response:
                 response.raise_for_status()
                 await response.text()
+        except ClientResponseError as err:
+            raise EvolvIOTApiError(
+                f"EvolvIOT local API returned HTTP {err.status}"
+            ) from err
+        except (asyncio.TimeoutError, ClientError) as err:
+            raise EvolvIOTConnectionError(
+                "Could not connect to EvolvIOT device locally"
+            ) from err
+
+    async def async_local_status(
+        self,
+        *,
+        uid: str,
+        device_id: str,
+        device_secret: str,
+    ) -> dict[str, Any]:
+        """Check device status directly over local HTTP."""
+        safe_device_id = _sanitize_device_id_for_mdns(device_id)
+        url = f"http://{LOCAL_MDNS_DOMAIN}-{safe_device_id}.local/status"
+        headers = _local_status_headers(uid, device_id, device_secret)
+
+        try:
+            async with self._session.get(
+                url,
+                headers=headers,
+                timeout=ClientTimeout(total=DEFAULT_LOCAL_COMMAND_TIMEOUT),
+            ) as response:
+                response.raise_for_status()
+                data = await response.json(content_type=None)
+                return data if isinstance(data, dict) else {}
         except ClientResponseError as err:
             raise EvolvIOTApiError(
                 f"EvolvIOT local API returned HTTP {err.status}"
