@@ -10,10 +10,7 @@
       },
       "pair": {
         "title": "Approve in the EvolvIOT app",
-        "description": "![EvolvIOT pairing QR]({qr_image_url})\n\nPairing code: `{user_code}`\n\nScan the QR code in the EvolvIOT app, or open this pairing link: {verification_uri}\n\nAfter the app shows success, keep the checkbox enabled and select Submit to continue.",
-        "data": {
-          "approved": "The EvolvIOT app shows pairing success"
-        }
+        "description": "| ![EvolvIOT pairing QR]({qr_image_url}) |\n|:--:|\n\nPairing code: `{user_code}`\n\nScan the QR code in the EvolvIOT app. After the app shows success, select Submit."
       }
     },
     "progress": {

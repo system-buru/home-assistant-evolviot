@@ -54,7 +54,7 @@ def _retry_schema() -> vol.Schema:
 
 
 def _pair_schema() -> vol.Schema:
-    return vol.Schema({vol.Required("approved", default=True): bool})
+    return vol.Schema({})
 
 
 def _qr_code_data_uri(payload: str) -> str:
@@ -126,50 +126,45 @@ class EvolvIOTConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return await self.async_step_user()
 
         if user_input is not None:
-            if not user_input.get("approved"):
+            device_code = str(self._pairing["device_code"])
+            try:
+                token_data = await self._api().async_exchange_device_code(device_code)
+                access_token = str(token_data.get("access_token") or "").strip()
+                refresh_token = str(token_data.get("refresh_token") or "").strip()
+                api = EvolvIOTApi(
+                    async_get_clientsession(self.hass, verify_ssl=self._verify_ssl),
+                    self._api_base_url,
+                    access_token,
+                    refresh_token=refresh_token,
+                    verify_ssl=self._verify_ssl,
+                )
+                payload = await api.async_validate()
+            except EvolvIOTDeviceAuthorizationPending:
                 errors["base"] = "authorization_pending"
+            except EvolvIOTDeviceAuthorizationExpired:
+                return await self._async_refresh_pairing("authorization_expired")
+            except EvolvIOTDeviceAuthorizationDenied:
+                return await self._async_refresh_pairing("authorization_denied")
+            except EvolvIOTAuthError:
+                return await self._async_refresh_pairing("invalid_auth")
+            except EvolvIOTConnectionError:
+                errors["base"] = "cannot_connect"
+            except Exception:
+                errors["base"] = "unknown"
             else:
-                device_code = str(self._pairing["device_code"])
-                try:
-                    token_data = await self._api().async_exchange_device_code(
-                        device_code
-                    )
-                    access_token = str(token_data.get("access_token") or "").strip()
-                    refresh_token = str(token_data.get("refresh_token") or "").strip()
-                    api = EvolvIOTApi(
-                        async_get_clientsession(self.hass, verify_ssl=self._verify_ssl),
-                        self._api_base_url,
-                        access_token,
-                        refresh_token=refresh_token,
-                        verify_ssl=self._verify_ssl,
-                    )
-                    payload = await api.async_validate()
-                except EvolvIOTDeviceAuthorizationPending:
-                    errors["base"] = "authorization_pending"
-                except EvolvIOTDeviceAuthorizationExpired:
-                    return await self._async_refresh_pairing("authorization_expired")
-                except EvolvIOTDeviceAuthorizationDenied:
-                    return await self._async_refresh_pairing("authorization_denied")
-                except EvolvIOTAuthError:
-                    return await self._async_refresh_pairing("invalid_auth")
-                except EvolvIOTConnectionError:
-                    errors["base"] = "cannot_connect"
-                except Exception:
-                    errors["base"] = "unknown"
-                else:
-                    self._cancel_pairing_refresh()
-                    unique_id = str(payload.get("user_id") or self._api_base_url)
-                    await self.async_set_unique_id(unique_id)
-                    self._abort_if_unique_id_configured()
-                    return self.async_create_entry(
-                        title=NAME,
-                        data={
-                            CONF_API_BASE_URL: self._api_base_url,
-                            CONF_ACCESS_TOKEN: access_token,
-                            CONF_REFRESH_TOKEN: refresh_token,
-                            CONF_VERIFY_SSL: self._verify_ssl,
-                        },
-                    )
+                self._cancel_pairing_refresh()
+                unique_id = str(payload.get("user_id") or self._api_base_url)
+                await self.async_set_unique_id(unique_id)
+                self._abort_if_unique_id_configured()
+                return self.async_create_entry(
+                    title=NAME,
+                    data={
+                        CONF_API_BASE_URL: self._api_base_url,
+                        CONF_ACCESS_TOKEN: access_token,
+                        CONF_REFRESH_TOKEN: refresh_token,
+                        CONF_VERIFY_SSL: self._verify_ssl,
+                    },
+                )
 
         return self.async_show_form(
             step_id="pair",
