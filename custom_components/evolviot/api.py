@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import time
@@ -25,6 +26,8 @@ from .const import (
 )
 
 TokenUpdateCallback = Callable[[dict[str, Any]], Awaitable[None]]
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class EvolvIOTApiError(Exception):
@@ -316,6 +319,7 @@ class EvolvIOTApi:
         url = f"http://{LOCAL_MDNS_DOMAIN}-{safe_device_id}.local/{safe_endpoint}"
 
         try:
+            _LOGGER.debug("Sending EvolvIOT local command to %s", url)
             async with self._session.post(
                 url,
                 json={"data": encrypted_data, "hmac": signature},
@@ -345,6 +349,7 @@ class EvolvIOTApi:
         headers = _local_status_headers(uid, device_id, device_secret)
 
         try:
+            _LOGGER.debug("Checking EvolvIOT local status at %s", url)
             async with self._session.get(
                 url,
                 headers=headers,

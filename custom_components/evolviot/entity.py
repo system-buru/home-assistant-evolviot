@@ -76,7 +76,10 @@ class EvolvIOTEntity(CoordinatorEntity[EvolvIOTDataUpdateCoordinator]):
             self._schedule_refresh()
             return
 
-        await self._async_send_first_success(payload, local_command)
+        if self.backend_state.get("local_available"):
+            await self._async_send_prefer_local(payload, local_command)
+        else:
+            await self._async_send_first_success(payload, local_command)
         self._apply_optimistic_state(payload)
         self._schedule_refresh()
 
@@ -123,6 +126,38 @@ class EvolvIOTEntity(CoordinatorEntity[EvolvIOTDataUpdateCoordinator]):
         if errors:
             raise errors[0]
 
+    async def _async_send_prefer_local(
+        self,
+        cloud_payload: dict[str, Any],
+        local_command: dict[str, Any],
+    ) -> None:
+        """Run cloud and local commands together, but require local when reachable."""
+        cloud_task = self.hass.async_create_task(
+            self.coordinator.api.async_command(
+                self._backend_entity_id,
+                cloud_payload,
+            )
+        )
+        local_task = self.hass.async_create_task(
+            self.coordinator.api.async_local_command(**local_command)
+        )
+
+        cloud_error: BaseException | None = None
+        try:
+            await local_task
+        except Exception as local_error:
+            try:
+                await cloud_task
+            except Exception as err:
+                cloud_error = err
+            if cloud_error is not None:
+                raise local_error from cloud_error
+        else:
+            if not cloud_task.done():
+                cloud_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await cloud_task
+
     def _local_command(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         """Build local encrypted command details when entity metadata supports it."""
         value = self._local_command_value(payload)
@@ -146,10 +181,14 @@ class EvolvIOTEntity(CoordinatorEntity[EvolvIOTDataUpdateCoordinator]):
         switch_name = str(
             local_control.get("switch_name")
             or local_control.get("switchName")
+            or local_control.get("status_key")
+            or local_control.get("statusKey")
             or control.get("key")
             or ""
         ).strip()
-        endpoint = str(local_control.get("endpoint") or switch_name).strip()
+        endpoint = str(local_control.get("endpoint") or "").strip()
+        if not endpoint or endpoint == "control":
+            endpoint = switch_name
 
         if not all((uid, device_id, device_secret, switch_name, endpoint)):
             return None
