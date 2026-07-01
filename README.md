@@ -6,12 +6,11 @@ This repository is structured for HACS:
 
 ```text
 custom_components/evolviot/
-brands/evolviot/icon.png
 hacs.json
 README.md
 ```
 
-HACS requires one integration under `custom_components/`, with the required integration files inside that directory. The current HACS publishing docs also require brand assets and prefer GitHub releases for versioned updates.
+HACS requires one integration under `custom_components/`, with the required integration files inside that directory. The integration includes a local `icon.png`, but Home Assistant's **Add integration** picker can still show `icon not available` until the EvolvIOT brand assets are published through the Home Assistant brands service.
 
 ## Install With HACS
 
@@ -24,97 +23,52 @@ HACS requires one integration under `custom_components/`, with the required inte
 
 ## Configuration
 
-The integration talks only to the EvolvIOT Home Assistant route:
+By default, the integration talks to the EvolvIOT Home Assistant route:
 
 ```text
 https://api.evolviot.com/api/homeassistant
 ```
 
-During setup, provide:
+It checks backend reachability with:
 
-- API base URL
-- SSL verification preference
+```text
+https://api.evolviot.com/health
+```
 
-Home Assistant then starts a short-lived pairing session. The user scans the QR code with the EvolvIOT app, or enters the pairing code manually in the app. Home Assistant polls automatically until the app approves the pairing or the user denies it. If the pairing code expires before approval, Home Assistant automatically requests a fresh code and QR payload.
+During setup, Home Assistant starts a short-lived pairing session and shows a QR code plus a pairing code.
 
-Do not hardcode OAuth client secrets in this public repository. The app-based device-code flow does not require a public HACS integration to ship a client secret.
+In the EvolvIOT app:
+
+1. Open **Profile**.
+2. Open **Third party services**.
+3. Open **Home Assistant**.
+4. Select **Scan QR**.
+5. Scan the QR code shown in Home Assistant.
+6. After the app shows success, select **Submit** in Home Assistant.
+
+If the pairing code expires before approval, Home Assistant requests a fresh code and QR payload. If Home Assistant says the account is already configured, remove the existing EvolvIOT integration from **Settings > Devices & services** before adding it again.
+
+## Security Notes
+
+- Pairing QR codes are generated locally inside Home Assistant and embedded in the setup dialog. The pairing payload is not sent to a third-party QR service.
+- Access and refresh tokens are stored in the Home Assistant config entry, which is the normal storage path for Home Assistant integrations.
+- Avoid disabling SSL verification except in a controlled local development environment.
 
 ## Backend Routes Used
 
-The integration uses the backend routes already exposed under `/api/homeassistant`:
+The Home Assistant integration calls this backend health route:
 
-- `GET /status`
+- `GET /health`
+
+It also calls these routes under `/api/homeassistant`:
+
 - `POST /device/authorize`
-- `POST /device/approve`
 - `POST /oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:device_code`
 - `POST /oauth/token` with `grant_type=refresh_token`
 - `GET /devices`
 - `GET /devices/states`
 - `GET /devices/:entityId/state`
 - `POST /devices/:entityId/command`
-
-## EvolvIOT App Pairing Contract
-
-Start pairing:
-
-```http
-POST /api/homeassistant/device/authorize
-```
-
-Response:
-
-```json
-{
-  "device_code": "uuid",
-  "user_code": "ABCD-2345",
-  "verification_uri": "https://evolviot.com/home-assistant/link",
-  "verification_uri_complete": "https://evolviot.com/home-assistant/link?user_code=ABCD-2345&platform=homeassistant",
-  "qr_payload": "https://evolviot.com/home-assistant/link?user_code=ABCD-2345&platform=homeassistant",
-  "expires_in": 600,
-  "interval": 5
-}
-```
-
-`expires_in` defaults to 600 seconds on the backend unless `HOME_ASSISTANT_DEVICE_AUTH_EXPIRES_IN_SECONDS` is set. `interval` defaults to 5 seconds unless `HOME_ASSISTANT_DEVICE_AUTH_POLL_INTERVAL_SECONDS` is set.
-
-Approve from logged-in EvolvIOT app:
-
-```http
-POST /api/homeassistant/device/approve
-Authorization: Bearer <app user access token>
-Content-Type: application/json
-
-{
-  "user_code": "ABCD-2345"
-}
-```
-
-Home Assistant polls:
-
-```http
-POST /api/homeassistant/oauth/token
-Content-Type: application/x-www-form-urlencoded
-
-grant_type=urn:ietf:params:oauth:grant-type:device_code
-device_code=<device_code>
-```
-
-Pending response:
-
-```json
-{ "error": "authorization_pending", "interval": 5 }
-```
-
-Approved response:
-
-```json
-{
-  "access_token": "...",
-  "refresh_token": "...",
-  "token_type": "Bearer",
-  "expires_in": 3600
-}
-```
 
 ## Supported Entities
 
@@ -136,22 +90,6 @@ For HACS users, publish GitHub releases such as:
 - `v1.0.1`
 
 HACS can use the default branch without releases, but releases provide a cleaner update experience.
-
-## Backend Environment
-
-Your backend must be configured with:
-
-```text
-HOME_ASSISTANT_OAUTH_CLIENT_ID=...
-HOME_ASSISTANT_OAUTH_CLIENT_SECRET=...
-HOME_ASSISTANT_OAUTH_REDIRECT_URIS=...
-HOME_ASSISTANT_DEVICE_AUTH_EXPIRES_IN_SECONDS=600
-HOME_ASSISTANT_DEVICE_AUTH_POLL_INTERVAL_SECONDS=5
-HOME_ASSISTANT_TOKEN_EXPIRES_IN_SECONDS=3600
-FRONTEND_URL=...
-```
-
-The public integration should never contain those secret values.
 
 ## References
 

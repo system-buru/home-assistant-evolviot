@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 from aiohttp import ClientError, ClientResponseError, ClientSession
 
-from .const import DEFAULT_API_BASE_URL
+from .const import DEFAULT_API_BASE_URL, DEFAULT_HEALTH_URL
 
 TokenUpdateCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -59,11 +59,13 @@ class EvolvIOTApi:
         refresh_token: str | None = None,
         client_id: str | None = None,
         client_secret: str | None = None,
+        health_url: str = DEFAULT_HEALTH_URL,
         verify_ssl: bool = True,
         token_update_callback: TokenUpdateCallback | None = None,
     ) -> None:
         self._session = session
         self.api_base_url = normalize_api_base_url(api_base_url)
+        self.health_url = health_url.strip().rstrip("/") or DEFAULT_HEALTH_URL
         self.access_token = access_token.strip()
         self.refresh_token = (refresh_token or "").strip()
         self.client_id = (client_id or "").strip()
@@ -73,12 +75,24 @@ class EvolvIOTApi:
 
     async def async_validate(self) -> dict[str, Any]:
         """Validate cloud reachability and the supplied bearer token."""
-        await self.async_status()
+        await self.async_health()
         return await self.async_get_devices()
 
-    async def async_status(self) -> dict[str, Any]:
-        """Fetch integration status."""
-        return await self._request("get", "/status", auth=False)
+    async def async_health(self) -> None:
+        """Check backend health."""
+        try:
+            async with self._session.get(
+                self.health_url,
+                ssl=None if self.verify_ssl else False,
+            ) as response:
+                response.raise_for_status()
+                await response.text()
+        except ClientResponseError as err:
+            raise EvolvIOTApiError(
+                f"EvolvIOT API returned HTTP {err.status}"
+            ) from err
+        except ClientError as err:
+            raise EvolvIOTConnectionError("Could not connect to EvolvIOT") from err
 
     async def async_exchange_authorization_code(
         self,
