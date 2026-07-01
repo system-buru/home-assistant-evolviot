@@ -73,7 +73,11 @@ class EvolvIOTDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
         for entity_id, local_status in local_statuses.items():
+            has_cloud_state = entity_id in states
             state = dict(states.get(entity_id) or {"entity_id": entity_id})
+            state["cloud_available"] = (
+                bool(state.get("available", True)) if has_cloud_state else False
+            )
             is_available = bool(local_status.get("available"))
             state["local_available"] = is_available
             if is_available:

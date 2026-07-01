@@ -61,11 +61,28 @@ class EvolvIOTEntity(CoordinatorEntity[EvolvIOTDataUpdateCoordinator]):
         """Expose useful EvolvIOT metadata."""
         entity = self.backend_entity
         state = self.backend_state
+        local_available = bool(state.get("local_available"))
+        cloud_available = bool(state.get("cloud_available", state.get("available", True)))
         return {
             "evolviot_entity_id": self._backend_entity_id,
+            "connection_mode": self._connection_mode(
+                cloud_available,
+                local_available,
+            ),
+            "cloud_available": cloud_available,
+            "local_available": local_available,
             "raw_value": state.get("raw_value"),
             "control": entity.get("control") or {},
         }
+
+    @staticmethod
+    def _connection_mode(cloud_available: bool, local_available: bool) -> str:
+        """Return the active connection mode label."""
+        if local_available:
+            return "local"
+        if cloud_available:
+            return "cloud"
+        return "offline"
 
     async def _async_send_command(self, payload: dict[str, Any]) -> None:
         """Send a command through cloud and local paths when available."""
