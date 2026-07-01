@@ -2,13 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
 from collections.abc import Awaitable, Callable
+import hashlib
+import hmac
+import json
+import os
+import re
 from typing import Any
 from urllib.parse import quote
 
-from aiohttp import ClientError, ClientResponseError, ClientSession
+from aiohttp import ClientError, ClientResponseError, ClientSession, ClientTimeout
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from .const import DEFAULT_API_BASE_URL, DEFAULT_HEALTH_URL
+from .const import (
+    DEFAULT_API_BASE_URL,
+    DEFAULT_HEALTH_URL,
+    DEFAULT_LOCAL_COMMAND_TIMEOUT,
+    LOCAL_MDNS_DOMAIN,
+)
 
 TokenUpdateCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -45,6 +58,57 @@ def normalize_api_base_url(value: str | None) -> str:
     if base_url.endswith("/api"):
         return f"{base_url}/homeassistant"
     return f"{base_url}/api/homeassistant"
+
+
+def _sanitize_device_id_for_mdns(device_id: str) -> str:
+    """Return the ESP mDNS-safe device id."""
+    return re.sub(r"[^a-z0-9-]", "-", device_id.lower())
+
+
+def _derive_local_keys(
+    device_secret: str,
+    uid: str,
+    device_id: str,
+) -> tuple[bytes, bytes]:
+    """Derive AES and HMAC keys matching the EvolvIOT app."""
+    key_material = f"{device_secret}:{uid}:{device_id}"
+    aes_key = hashlib.sha256(f"{key_material}:AES".encode()).digest()
+    hmac_key = hashlib.sha256(f"{key_material}:HMAC".encode()).digest()
+    return aes_key, hmac_key
+
+
+def _encrypt_local_payload(
+    payload: dict[str, Any],
+    device_secret: str,
+    uid: str,
+    device_id: str,
+) -> str:
+    """Encrypt local control payload with AES-256-CBC."""
+    aes_key, _ = _derive_local_keys(device_secret, uid, device_id)
+    payload_bytes = json.dumps(payload, separators=(",", ":")).encode()
+    padding_size = 16 - (len(payload_bytes) % 16)
+    padded_payload = payload_bytes + bytes([padding_size]) * padding_size
+
+    iv = os.urandom(16)
+    encryptor = Cipher(algorithms.AES(aes_key), modes.CBC(iv)).encryptor()
+    ciphertext = encryptor.update(padded_payload) + encryptor.finalize()
+    return base64.b64encode(iv + ciphertext).decode("ascii")
+
+
+def _sign_local_payload(
+    encrypted_data: str,
+    device_secret: str,
+    uid: str,
+    device_id: str,
+) -> str:
+    """Sign encrypted local control payload with HMAC-SHA256."""
+    _, hmac_key = _derive_local_keys(device_secret, uid, device_id)
+    signature = hmac.new(
+        hmac_key,
+        encrypted_data.encode(),
+        hashlib.sha256,
+    ).digest()
+    return base64.b64encode(signature).decode("ascii")
 
 
 class EvolvIOTApi:
@@ -200,6 +264,54 @@ class EvolvIOTApi:
         return await self._request(
             "post", f"/devices/{safe_entity_id}/command", json=payload
         )
+
+    async def async_local_command(
+        self,
+        *,
+        uid: str,
+        device_id: str,
+        endpoint: str,
+        device_secret: str,
+        switch_name: str,
+        value: int | float | bool,
+    ) -> None:
+        """Send an encrypted command directly to an ESP over local HTTP."""
+        local_payload = {
+            "switchName": switch_name,
+            "value": value,
+        }
+        encrypted_data = _encrypt_local_payload(
+            local_payload,
+            device_secret,
+            uid,
+            device_id,
+        )
+        signature = _sign_local_payload(
+            encrypted_data,
+            device_secret,
+            uid,
+            device_id,
+        )
+        safe_endpoint = quote(endpoint.strip("/"), safe="")
+        safe_device_id = _sanitize_device_id_for_mdns(device_id)
+        url = f"http://{LOCAL_MDNS_DOMAIN}-{safe_device_id}.local/{safe_endpoint}"
+
+        try:
+            async with self._session.post(
+                url,
+                json={"data": encrypted_data, "hmac": signature},
+                timeout=ClientTimeout(total=DEFAULT_LOCAL_COMMAND_TIMEOUT),
+            ) as response:
+                response.raise_for_status()
+                await response.text()
+        except ClientResponseError as err:
+            raise EvolvIOTApiError(
+                f"EvolvIOT local API returned HTTP {err.status}"
+            ) from err
+        except (asyncio.TimeoutError, ClientError) as err:
+            raise EvolvIOTConnectionError(
+                "Could not connect to EvolvIOT device locally"
+            ) from err
 
     async def _request(
         self,
