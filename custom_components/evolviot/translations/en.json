@@ -38,5 +38,12 @@
         }
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "connection_mode": {
+        "name": "Connection Mode"
+      }
+    }
   }
 }
