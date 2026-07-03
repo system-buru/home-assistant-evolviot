@@ -44,7 +44,11 @@ async def async_setup_entry(
 class EvolvIOTFan(EvolvIOTEntity, FanEntity):
     """EvolvIOT fan entity."""
 
-    _attr_supported_features = FanEntityFeature.SET_SPEED
+    _attr_supported_features = (
+        FanEntityFeature.SET_SPEED
+        | FanEntityFeature.TURN_ON
+        | FanEntityFeature.TURN_OFF
+    )
 
     @property
     def is_on(self) -> bool | None:
