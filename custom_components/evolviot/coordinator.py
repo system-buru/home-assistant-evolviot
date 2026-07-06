@@ -7,10 +7,11 @@ import logging
 from typing import Any
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import EvolvIOTApi, EvolvIOTApiError
-from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
+from .api import EvolvIOTApi, EvolvIOTApiError, EvolvIOTAuthError
+from .const import DEFAULT_SCAN_INTERVAL, DOMAIN, STORAGE_KEY_PREFIX, STORAGE_VERSION
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -18,7 +19,7 @@ _LOGGER = logging.getLogger(__name__)
 class EvolvIOTDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Fetch EvolvIOT entities and states on a shared schedule."""
 
-    def __init__(self, hass: HomeAssistant, api: EvolvIOTApi) -> None:
+    def __init__(self, hass: HomeAssistant, api: EvolvIOTApi, entry_id: str) -> None:
         super().__init__(
             hass,
             _LOGGER,
@@ -26,6 +27,22 @@ class EvolvIOTDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=DEFAULT_SCAN_INTERVAL,
         )
         self.api = api
+        self._store: Store[dict[str, Any]] = Store(
+            hass,
+            STORAGE_VERSION,
+            f"{STORAGE_KEY_PREFIX}.{entry_id}",
+        )
+        self._cached_devices_payload: dict[str, Any] | None = None
+
+    async def async_load_cache(self) -> None:
+        """Load cached device metadata for offline startup."""
+        stored = await self._store.async_load()
+        if not isinstance(stored, dict):
+            return
+
+        devices_payload = stored.get("devices_payload")
+        if isinstance(devices_payload, dict):
+            self._cached_devices_payload = devices_payload
 
     @property
     def entities(self) -> dict[str, dict[str, Any]]:
@@ -51,17 +68,32 @@ class EvolvIOTDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch fresh data from EvolvIOT."""
+        states_payload: dict[str, Any] = {}
+        cloud_error: EvolvIOTApiError | None = None
+
         try:
             devices_payload = await self.api.async_get_devices()
-            states_payload = await self.api.async_get_states()
-        except EvolvIOTApiError as err:
+        except EvolvIOTAuthError as err:
             raise UpdateFailed(str(err)) from err
+        except EvolvIOTApiError as err:
+            cloud_error = err
+            devices_payload = self._cached_devices_payload or {}
+        else:
+            await self._async_save_cached_devices_payload(devices_payload)
+            try:
+                states_payload = await self.api.async_get_states()
+            except EvolvIOTApiError as err:
+                cloud_error = err
 
         entities = {
             str(entity.get("entity_id")): entity
             for entity in devices_payload.get("entities", [])
             if entity.get("entity_id")
         }
+
+        if not entities and cloud_error is not None:
+            raise UpdateFailed(str(cloud_error)) from cloud_error
+
         states = {
             str(state.get("entity_id")): state
             for state in states_payload.get("states", [])
@@ -97,6 +129,17 @@ class EvolvIOTDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "entities": entities,
             "states": states,
         }
+
+    async def _async_save_cached_devices_payload(
+        self,
+        devices_payload: dict[str, Any],
+    ) -> None:
+        """Persist device metadata needed for local-only operation."""
+        if not devices_payload.get("entities"):
+            return
+
+        self._cached_devices_payload = devices_payload
+        await self._store.async_save({"devices_payload": devices_payload})
 
     async def _async_local_statuses(
         self,
