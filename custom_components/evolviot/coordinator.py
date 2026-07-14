@@ -11,7 +11,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import EvolvIOTApi, EvolvIOTApiError, EvolvIOTAuthError
-from .const import DEFAULT_SCAN_INTERVAL, DOMAIN, STORAGE_KEY_PREFIX, STORAGE_VERSION
+from .const import DOMAIN, STORAGE_KEY_PREFIX, STORAGE_VERSION
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ class EvolvIOTDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=DEFAULT_SCAN_INTERVAL,
+            update_interval=None,
         )
         self.api = api
         self._store: Store[dict[str, Any]] = Store(
@@ -68,6 +68,23 @@ class EvolvIOTDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch fresh data from EvolvIOT."""
+        if not self.api.websocket_started:
+            try:
+                await self.api.async_start_websocket(
+                    self._async_handle_ws_ready,
+                    self._async_handle_ws_state_changed,
+                )
+                ready_payload = await self.api.async_wait_websocket_ready()
+                return await self._async_data_from_ws_ready(ready_payload)
+            except EvolvIOTAuthError as err:
+                raise UpdateFailed(str(err)) from err
+            except EvolvIOTApiError as err:
+                _LOGGER.debug("Falling back to EvolvIOT HTTP refresh: %s", err)
+
+        return await self._async_http_update_data()
+
+    async def _async_http_update_data(self) -> dict[str, Any]:
+        """Fetch fresh data from EvolvIOT over HTTP or WS request fallback."""
         states_payload: dict[str, Any] = {}
         cloud_error: EvolvIOTApiError | None = None
 
@@ -79,12 +96,43 @@ class EvolvIOTDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             cloud_error = err
             devices_payload = self._cached_devices_payload or {}
         else:
+            if not devices_payload.get("user_id") and isinstance(self.data, dict):
+                devices_payload["user_id"] = self.data.get("user_id")
             await self._async_save_cached_devices_payload(devices_payload)
             try:
                 states_payload = await self.api.async_get_states()
             except EvolvIOTApiError as err:
                 cloud_error = err
 
+        return await self._async_merge_payloads(
+            devices_payload,
+            states_payload,
+            cloud_error,
+        )
+
+    async def _async_data_from_ws_ready(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Build coordinator data from a WebSocket ready payload."""
+        devices_payload = {
+            "user_id": payload.get("user_id"),
+            "entities": payload.get("entities")
+            if isinstance(payload.get("entities"), list)
+            else [],
+        }
+        states_payload = {
+            "states": payload.get("states")
+            if isinstance(payload.get("states"), list)
+            else [],
+        }
+        await self._async_save_cached_devices_payload(devices_payload)
+        return await self._async_merge_payloads(devices_payload, states_payload)
+
+    async def _async_merge_payloads(
+        self,
+        devices_payload: dict[str, Any],
+        states_payload: dict[str, Any],
+        cloud_error: EvolvIOTApiError | None = None,
+    ) -> dict[str, Any]:
+        """Merge entity metadata, cloud states, and local status checks."""
         entities = {
             str(entity.get("entity_id")): entity
             for entity in devices_payload.get("entities", [])
@@ -129,6 +177,30 @@ class EvolvIOTDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "entities": entities,
             "states": states,
         }
+
+    async def _async_handle_ws_ready(self, payload: dict[str, Any]) -> None:
+        """Apply a WebSocket ready payload to Home Assistant."""
+        data = await self._async_data_from_ws_ready(payload)
+        self.async_set_updated_data(data)
+
+    async def _async_handle_ws_state_changed(self, payload: dict[str, Any]) -> None:
+        """Apply a pushed WebSocket state update."""
+        state = payload.get("state")
+        if not isinstance(state, dict):
+            return
+
+        entity_id = str(state.get("entity_id") or "")
+        if not entity_id:
+            return
+
+        data = dict(self.data or {})
+        if not data:
+            return
+
+        states = dict(data.get("states") or {})
+        states[entity_id] = state
+        data["states"] = states
+        self.async_set_updated_data(data)
 
     async def _async_save_cached_devices_payload(
         self,

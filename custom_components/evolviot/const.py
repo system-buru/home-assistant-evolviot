@@ -9,9 +9,16 @@ from homeassistant.const import Platform
 DOMAIN = "evolviot"
 NAME = "EvolvIOT"
 
-DEFAULT_API_BASE_URL = "https://api.evolviot.com/api/homeassistant"
-DEFAULT_HEALTH_URL = "https://api.evolviot.com/health"
+# DEFAULT_API_BASE_URL = "https://api.evolviot.com/api/homeassistant"
+DEFAULT_API_BASE_URL = "https://testapi.evolviot.com/api/homeassistant"
+# DEFAULT_HEALTH_URL = "https://api.evolviot.com/health"
+DEFAULT_HEALTH_URL = "https://testapi.evolviot.com/health"
 DEFAULT_LOCAL_COMMAND_TIMEOUT = 3
+DEFAULT_WS_CONNECT_TIMEOUT = 10
+DEFAULT_WS_REQUEST_TIMEOUT = 10
+DEFAULT_WS_READY_TIMEOUT = 15
+DEFAULT_WS_HEARTBEAT = 30
+DEFAULT_WS_RECONNECT_DELAYS = (1, 2, 5, 10, 30)
 LOCAL_MDNS_DOMAIN = "evolviot"
 DEFAULT_SCAN_INTERVAL = timedelta(seconds=15)
 STORAGE_VERSION = 1

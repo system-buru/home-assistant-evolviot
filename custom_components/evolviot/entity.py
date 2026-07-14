@@ -264,6 +264,8 @@ class EvolvIOTEntity(CoordinatorEntity[EvolvIOTDataUpdateCoordinator]):
 
     def _schedule_refresh(self) -> None:
         """Refresh after a short delay to avoid rendering stale command state."""
+        if self.coordinator.api.websocket_connected:
+            return
         self.hass.async_create_task(self._async_delayed_refresh())
 
     async def _async_delayed_refresh(self) -> None:
