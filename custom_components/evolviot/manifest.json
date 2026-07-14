@@ -1,7 +1,7 @@
 {
   "domain": "evolviot",
   "name": "EvolvIOT",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "documentation": "https://github.com/system-buru/home-assistant-evolviot",
   "issue_tracker": "https://github.com/system-buru/home-assistant-evolviot/issues",
   "codeowners": ["@system-buru"],
