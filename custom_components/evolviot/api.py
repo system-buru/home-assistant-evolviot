@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 import contextlib
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 from aiohttp import (
     ClientError,
+    ClientConnectorError,
     ClientResponseError,
     ClientSession,
     ClientTimeout,
@@ -31,12 +33,19 @@ from .const import (
     DEFAULT_API_BASE_URL,
     DEFAULT_HEALTH_URL,
     DEFAULT_LOCAL_COMMAND_TIMEOUT,
+    DEFAULT_LOCAL_DISCOVERY_TIMEOUT,
     DEFAULT_WS_CONNECT_TIMEOUT,
     DEFAULT_WS_HEARTBEAT,
     DEFAULT_WS_READY_TIMEOUT,
     DEFAULT_WS_RECONNECT_DELAYS,
     DEFAULT_WS_REQUEST_TIMEOUT,
     LOCAL_MDNS_DOMAIN,
+)
+from .local_socket import (
+    LocalCommandRejected,
+    LocalCommandUncertain,
+    LocalDeviceSocket,
+    LocalSocketUnavailable,
 )
 
 TokenUpdateCallback = Callable[[dict[str, Any]], Awaitable[None]]
@@ -55,6 +64,14 @@ class EvolvIOTAuthError(EvolvIOTApiError):
 
 class EvolvIOTConnectionError(EvolvIOTApiError):
     """Connection failed."""
+
+
+class EvolvIOTCommandUnavailable(EvolvIOTConnectionError):
+    """Command was not sent; another transport can be used."""
+
+
+class EvolvIOTCommandUncertain(EvolvIOTApiError):
+    """Command may have executed and must not be replayed."""
 
 
 class EvolvIOTDeviceAuthorizationPending(EvolvIOTApiError):
@@ -82,6 +99,18 @@ def normalize_api_base_url(value: str | None) -> str:
 def _sanitize_device_id_for_mdns(device_id: str) -> str:
     """Return the ESP mDNS-safe device id."""
     return re.sub(r"[^a-z0-9-]", "-", device_id.lower())
+
+
+def local_device_host(
+    device: dict[str, Any], local_control: dict[str, Any]
+) -> str | None:
+    """Return the cached LAN IP using the same metadata aliases as the app."""
+    return (
+        local_control.get("ip")
+        or device.get("ip")
+        or (device.get("info") or {}).get("ip")
+        or (device.get("deviceInfo") or {}).get("ip")
+    )
 
 
 def _derive_local_keys(
@@ -130,7 +159,9 @@ def _sign_local_payload(
     return base64.b64encode(signature).decode("ascii")
 
 
-def _local_status_headers(uid: str, device_id: str, device_secret: str) -> dict[str, str]:
+def _local_status_headers(
+    uid: str, device_id: str, device_secret: str
+) -> dict[str, str]:
     """Build signed local status headers matching the EvolvIOT app."""
     timestamp = str(int(time.time()))
     nonce = base64.urlsafe_b64encode(os.urandom(12)).decode("ascii").rstrip("=")
@@ -181,6 +212,11 @@ class EvolvIOTApi:
         self._ws_stop_requested = False
         self._ws_on_ready: WebSocketMessageCallback | None = None
         self._ws_on_state_changed: WebSocketMessageCallback | None = None
+        self._local_clients: dict[str, LocalDeviceSocket] = {}
+        self.local_transports: dict[str, str] = {}
+        self.local_status_callback: (
+            Callable[[str, dict[str, Any] | None], None] | None
+        ) = None
 
     @property
     def websocket_started(self) -> bool:
@@ -211,9 +247,7 @@ class EvolvIOTApi:
                 response.raise_for_status()
                 await response.text()
         except ClientResponseError as err:
-            raise EvolvIOTApiError(
-                f"EvolvIOT API returned HTTP {err.status}"
-            ) from err
+            raise EvolvIOTApiError(f"EvolvIOT API returned HTTP {err.status}") from err
         except ClientError as err:
             raise EvolvIOTConnectionError("Could not connect to EvolvIOT") from err
 
@@ -240,7 +274,9 @@ class EvolvIOTApi:
                 response.raise_for_status()
                 data = await response.json(content_type=None)
                 if not isinstance(data, dict) or not data.get("access_token"):
-                    raise EvolvIOTAuthError("Token response did not include access token")
+                    raise EvolvIOTAuthError(
+                        "Token response did not include access token"
+                    )
                 return data
         except EvolvIOTApiError:
             raise
@@ -260,9 +296,7 @@ class EvolvIOTApi:
                 data = await response.json(content_type=None)
                 return data if isinstance(data, dict) else {}
         except ClientResponseError as err:
-            raise EvolvIOTApiError(
-                f"EvolvIOT API returned HTTP {err.status}"
-            ) from err
+            raise EvolvIOTApiError(f"EvolvIOT API returned HTTP {err.status}") from err
         except ClientError as err:
             raise EvolvIOTConnectionError("Could not connect to EvolvIOT") from err
 
@@ -295,7 +329,9 @@ class EvolvIOTApi:
                     raise EvolvIOTAuthError(error or "Device authorization failed")
 
                 if not isinstance(data, dict) or not data.get("access_token"):
-                    raise EvolvIOTAuthError("Token response did not include access token")
+                    raise EvolvIOTAuthError(
+                        "Token response did not include access token"
+                    )
                 return data
         except EvolvIOTApiError:
             raise
@@ -329,18 +365,42 @@ class EvolvIOTApi:
         self, entity_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         """Send a command to one entity."""
-        if self.websocket_connected:
-            return await self.async_ws_request(
-                {
-                    "type": "device.command",
-                    "entity_id": entity_id,
-                    "payload": payload,
-                }
+        try:
+            if self.websocket_connected:
+                result = await self.async_ws_request(
+                    {
+                        "type": "device.command",
+                        "entity_id": entity_id,
+                        "payload": payload,
+                    }
+                )
+            else:
+                safe_entity_id = quote(entity_id, safe="")
+                result = await self._request(
+                    "post",
+                    f"/devices/{safe_entity_id}/command",
+                    json=payload,
+                    timeout=ClientTimeout(total=DEFAULT_WS_REQUEST_TIMEOUT),
+                )
+        except EvolvIOTCommandUnavailable:
+            raise
+        except EvolvIOTConnectionError as err:
+            if isinstance(err.__cause__, ClientConnectorError):
+                raise EvolvIOTCommandUnavailable(str(err)) from err
+            raise EvolvIOTCommandUncertain(
+                "Cloud command acknowledgement lost; command will not be repeated"
+            ) from err
+        except TimeoutError as err:
+            raise EvolvIOTCommandUncertain("Cloud command timed out") from err
+        if result.get("success") is False or result.get("s") == "error":
+            raise EvolvIOTApiError(
+                str(
+                    result.get("reason")
+                    or result.get("message")
+                    or "Cloud rejected command"
+                )
             )
-        safe_entity_id = quote(entity_id, safe="")
-        return await self._request(
-            "post", f"/devices/{safe_entity_id}/command", json=payload
-        )
+        return result
 
     async def async_start_websocket(
         self,
@@ -378,7 +438,7 @@ class EvolvIOTApi:
     ) -> dict[str, Any]:
         """Send a request over the WebSocket and wait for its response."""
         if not self.websocket_connected or self._ws is None:
-            raise EvolvIOTConnectionError("EvolvIOT WebSocket is not connected")
+            raise EvolvIOTCommandUnavailable("EvolvIOT WebSocket is not connected")
 
         self._ws_request_id += 1
         request_id = str(message.get("id") or f"ha-{self._ws_request_id}")
@@ -396,14 +456,23 @@ class EvolvIOTApi:
             raise EvolvIOTConnectionError(
                 "Timed out waiting for EvolvIOT WebSocket response"
             ) from err
-        except ClientError as err:
+        except (ClientError, OSError, RuntimeError) as err:
             self._ws_pending.pop(request_id, None)
             raise EvolvIOTConnectionError(
                 "Could not send EvolvIOT WebSocket request"
             ) from err
+        finally:
+            self._ws_pending.pop(request_id, None)
+            if not future.done():
+                future.cancel()
 
     async def async_close(self) -> None:
         """Close open EvolvIOT connections."""
+        self.local_status_callback = None
+        await asyncio.gather(
+            *(client.close() for client in self._local_clients.values())
+        )
+        self._local_clients.clear()
         self._ws_stop_requested = True
         if self._ws is not None and not self._ws.closed:
             await self._ws.close()
@@ -468,11 +537,13 @@ class EvolvIOTApi:
             )
         except WSServerHandshakeError as err:
             if err.status in (401, 403):
-                raise EvolvIOTAuthError("Invalid EvolvIOT WebSocket credentials") from err
+                raise EvolvIOTAuthError(
+                    "Invalid EvolvIOT WebSocket credentials"
+                ) from err
             raise EvolvIOTConnectionError(
                 f"EvolvIOT WebSocket returned HTTP {err.status}"
             ) from err
-        except ClientError as err:
+        except (ClientError, TimeoutError) as err:
             raise EvolvIOTConnectionError(
                 "Could not connect to EvolvIOT WebSocket"
             ) from err
@@ -576,6 +647,57 @@ class EvolvIOTApi:
                 future.set_exception(err)
         self._ws_pending.clear()
 
+    def _local_host(self, device_id: str, host: str | None = None) -> str:
+        """Use an automatically supplied LAN IP or the device mDNS hostname."""
+        address = host
+        if address:
+            try:
+                ip = ipaddress.ip_address(address)
+            except ValueError:
+                pass
+            else:
+                return f"[{ip}]" if ip.version == 6 else str(ip)
+        return f"{LOCAL_MDNS_DOMAIN}-{_sanitize_device_id_for_mdns(device_id)}.local"
+
+    async def async_prune_local_clients(self, device_ids: set[str]) -> None:
+        """Release connections for devices no longer in the account."""
+        for device_id in set(self._local_clients) - device_ids:
+            await self._local_clients.pop(device_id).close()
+            self.local_transports.pop(device_id, None)
+
+    async def _async_local_client(
+        self, device_id: str, host: str | None
+    ) -> LocalDeviceSocket:
+        """Get a shared native device connection, preferring a valid cached LAN IP."""
+        mdns = f"{LOCAL_MDNS_DOMAIN}-{_sanitize_device_id_for_mdns(device_id)}.local"
+        primary = self._local_host(device_id, host)
+        hosts = [primary]
+        if primary != mdns:
+            hosts.append(mdns)
+        urls = [f"ws://{name}/ws" for name in hosts]
+        client = self._local_clients.get(device_id)
+        if client is not None and client.urls != urls:
+            await client.close()
+            client = None
+        if client is None:
+
+            def on_status(data: dict[str, Any] | None) -> None:
+                if data is not None:
+                    self.local_transports[device_id] = "local_ws"
+                elif self.local_transports.get(device_id) == "local_ws":
+                    self.local_transports.pop(device_id, None)
+                if self.local_status_callback is not None:
+                    self.local_status_callback(device_id, data)
+
+            client = LocalDeviceSocket(
+                self._session,
+                urls,
+                on_status,
+                discovery_timeout=DEFAULT_LOCAL_DISCOVERY_TIMEOUT,
+            )
+            self._local_clients[device_id] = client
+        return client
+
     async def async_local_command(
         self,
         *,
@@ -585,6 +707,48 @@ class EvolvIOTApi:
         device_secret: str,
         switch_name: str,
         value: int | float | bool,
+        host: str | None = None,
+    ) -> str:
+        """Try native WebSocket, then HTTP only if nothing was sent."""
+        client = await self._async_local_client(device_id, host)
+        data = _encrypt_local_payload(
+            {"key": switch_name, "value": value}, device_secret, uid, device_id
+        )
+        envelope = {
+            "data": data,
+            "hmac": _sign_local_payload(data, device_secret, uid, device_id),
+        }
+        try:
+            await client.send_command(switch_name, envelope)
+        except LocalSocketUnavailable:
+            await self._async_local_http_command(
+                uid=uid,
+                device_id=device_id,
+                endpoint=endpoint,
+                device_secret=device_secret,
+                switch_name=switch_name,
+                value=value,
+                host=host,
+            )
+            self.local_transports[device_id] = "local_http"
+            return "local_http"
+        except LocalCommandRejected as err:
+            raise EvolvIOTApiError(str(err)) from err
+        except LocalCommandUncertain as err:
+            raise EvolvIOTCommandUncertain(str(err)) from err
+        self.local_transports[device_id] = "local_ws"
+        return "local_ws"
+
+    async def _async_local_http_command(
+        self,
+        *,
+        uid: str,
+        device_id: str,
+        endpoint: str,
+        device_secret: str,
+        switch_name: str,
+        value: int | float | bool,
+        host: str | None = None,
     ) -> None:
         """Send an encrypted command directly to an ESP over local HTTP."""
         local_payload = {
@@ -604,15 +768,20 @@ class EvolvIOTApi:
             device_id,
         )
         safe_endpoint = quote(endpoint.strip("/"), safe="")
-        safe_device_id = _sanitize_device_id_for_mdns(device_id)
-        url = f"http://{LOCAL_MDNS_DOMAIN}-{safe_device_id}.local/{safe_endpoint}"
+        local_host = self._local_host(device_id, host)
+        url = f"http://{local_host}/{safe_endpoint}"
+        timeout = (
+            DEFAULT_LOCAL_DISCOVERY_TIMEOUT
+            if local_host.endswith(".local")
+            else DEFAULT_LOCAL_COMMAND_TIMEOUT
+        )
 
         try:
             _LOGGER.debug("Sending EvolvIOT local command to %s", url)
             async with self._session.post(
                 url,
                 json={"data": encrypted_data, "hmac": signature},
-                timeout=ClientTimeout(total=DEFAULT_LOCAL_COMMAND_TIMEOUT),
+                timeout=ClientTimeout(total=timeout),
             ) as response:
                 response.raise_for_status()
                 await response.text()
@@ -620,9 +789,13 @@ class EvolvIOTApi:
             raise EvolvIOTApiError(
                 f"EvolvIOT local API returned HTTP {err.status}"
             ) from err
-        except (asyncio.TimeoutError, ClientError) as err:
-            raise EvolvIOTConnectionError(
+        except ClientConnectorError as err:
+            raise EvolvIOTCommandUnavailable(
                 "Could not connect to EvolvIOT device locally"
+            ) from err
+        except (asyncio.TimeoutError, ClientError) as err:
+            raise EvolvIOTCommandUncertain(
+                "Local HTTP command acknowledgement lost"
             ) from err
 
     async def async_local_status(
@@ -631,10 +804,42 @@ class EvolvIOTApi:
         uid: str,
         device_id: str,
         device_secret: str,
+        host: str | None = None,
+    ) -> dict[str, Any]:
+        """Read a fresh native snapshot, falling back to signed HTTP status."""
+        client = await self._async_local_client(device_id, host)
+        try:
+            return await client.request_status()
+        except LocalSocketUnavailable:
+            try:
+                data = await self._async_local_http_status(
+                    uid=uid,
+                    device_id=device_id,
+                    device_secret=device_secret,
+                    host=host,
+                )
+            except EvolvIOTApiError:
+                self.local_transports.pop(device_id, None)
+                raise
+            self.local_transports[device_id] = "local_http"
+            return data
+
+    async def _async_local_http_status(
+        self,
+        *,
+        uid: str,
+        device_id: str,
+        device_secret: str,
+        host: str | None = None,
     ) -> dict[str, Any]:
         """Check device status directly over local HTTP."""
-        safe_device_id = _sanitize_device_id_for_mdns(device_id)
-        url = f"http://{LOCAL_MDNS_DOMAIN}-{safe_device_id}.local/status"
+        local_host = self._local_host(device_id, host)
+        url = f"http://{local_host}/status"
+        timeout = (
+            DEFAULT_LOCAL_DISCOVERY_TIMEOUT
+            if local_host.endswith(".local")
+            else DEFAULT_LOCAL_COMMAND_TIMEOUT
+        )
         headers = _local_status_headers(uid, device_id, device_secret)
 
         try:
@@ -642,7 +847,7 @@ class EvolvIOTApi:
             async with self._session.get(
                 url,
                 headers=headers,
-                timeout=ClientTimeout(total=DEFAULT_LOCAL_COMMAND_TIMEOUT),
+                timeout=ClientTimeout(total=timeout),
             ) as response:
                 response.raise_for_status()
                 data = await response.json(content_type=None)
@@ -651,7 +856,7 @@ class EvolvIOTApi:
             raise EvolvIOTApiError(
                 f"EvolvIOT local API returned HTTP {err.status}"
             ) from err
-        except (asyncio.TimeoutError, ClientError) as err:
+        except (asyncio.TimeoutError, ClientError, ValueError) as err:
             raise EvolvIOTConnectionError(
                 "Could not connect to EvolvIOT device locally"
             ) from err
@@ -671,6 +876,7 @@ class EvolvIOTApi:
             headers["Authorization"] = f"Bearer {self.access_token}"
 
         url = f"{self.api_base_url}{path}"
+        kwargs.setdefault("timeout", ClientTimeout(total=DEFAULT_WS_REQUEST_TIMEOUT))
         try:
             async with self._session.request(
                 method.upper(),
@@ -696,10 +902,8 @@ class EvolvIOTApi:
         except EvolvIOTApiError:
             raise
         except ClientResponseError as err:
-            raise EvolvIOTApiError(
-                f"EvolvIOT API returned HTTP {err.status}"
-            ) from err
-        except ClientError as err:
+            raise EvolvIOTApiError(f"EvolvIOT API returned HTTP {err.status}") from err
+        except (ClientError, TimeoutError, ValueError) as err:
             raise EvolvIOTConnectionError("Could not connect to EvolvIOT") from err
 
     async def _async_refresh_token(self) -> bool:
@@ -721,11 +925,12 @@ class EvolvIOTApi:
                 f"{self.api_base_url}/oauth/token",
                 data=data,
                 ssl=None if self.verify_ssl else False,
+                timeout=ClientTimeout(total=DEFAULT_WS_REQUEST_TIMEOUT),
             ) as response:
                 if response.status >= 400:
                     return False
                 token_data = await response.json(content_type=None)
-        except ClientError:
+        except (ClientError, TimeoutError):
             return False
 
         access_token = str(token_data.get("access_token") or "").strip()

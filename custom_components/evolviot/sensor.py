@@ -97,6 +97,7 @@ class EvolvIOTConnectionModeSensor(
     def native_value(self) -> str:
         """Return active connection mode for this physical device."""
         local_available = False
+        local_live_available = False
         cloud_available = False
 
         for entity in _entities_for_device(self.coordinator, self._device_id):
@@ -104,10 +105,16 @@ class EvolvIOTConnectionModeSensor(
             if not state:
                 continue
             local_available = local_available or bool(state.get("local_available"))
+            local_live_available = local_live_available or bool(
+                state.get("local_available")
+                and state.get("local_transport") == "local_ws"
+            )
             cloud_available = cloud_available or bool(
                 state.get("cloud_available", state.get("available", True))
             )
 
+        if local_live_available:
+            return "local live"
         if local_available:
             return "local"
         if cloud_available:

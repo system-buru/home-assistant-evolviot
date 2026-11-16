@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
 from typing import Any
 
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .api import (
+    EvolvIOTAuthError,
+    EvolvIOTCommandUnavailable,
+    EvolvIOTCommandUncertain,
+    local_device_host,
+)
 from .const import DOMAIN
 from .coordinator import EvolvIOTDataUpdateCoordinator
 
@@ -41,7 +46,9 @@ class EvolvIOTEntity(CoordinatorEntity[EvolvIOTDataUpdateCoordinator]):
     @property
     def backend_entity(self) -> dict[str, Any]:
         """Return latest backend entity metadata."""
-        return self.coordinator.entities.get(self._backend_entity_id, self._fallback_entity)
+        return self.coordinator.entities.get(
+            self._backend_entity_id, self._fallback_entity
+        )
 
     @property
     def backend_state(self) -> dict[str, Any]:
@@ -62,9 +69,12 @@ class EvolvIOTEntity(CoordinatorEntity[EvolvIOTDataUpdateCoordinator]):
         entity = self.backend_entity
         state = self.backend_state
         local_available = bool(state.get("local_available"))
-        cloud_available = bool(state.get("cloud_available", state.get("available", True)))
+        cloud_available = bool(
+            state.get("cloud_available", state.get("available", True))
+        )
         return {
             "evolviot_entity_id": self._backend_entity_id,
+            "evolviot_device_id": str((entity.get("device") or {}).get("id") or ""),
             "connection_mode": self._connection_mode(
                 cloud_available,
                 local_available,
@@ -75,105 +85,50 @@ class EvolvIOTEntity(CoordinatorEntity[EvolvIOTDataUpdateCoordinator]):
             "control": entity.get("control") or {},
         }
 
-    @staticmethod
-    def _connection_mode(cloud_available: bool, local_available: bool) -> str:
-        """Return the active connection mode label."""
-        if local_available:
-            return "local"
+    def _connection_mode(self, cloud_available: bool, local_available: bool) -> str:
+        """Return the preferred currently available transport."""
         if cloud_available:
             return "cloud"
+        if local_available:
+            return self.backend_state.get("local_transport") or "local_http"
         return "offline"
 
     async def _async_send_command(self, payload: dict[str, Any]) -> None:
-        """Send a command through cloud and local paths when available."""
+        """Use cloud, native device WebSocket, then the legacy local HTTP API."""
         local_command = self._local_command(payload)
-        if local_command is None:
-            await self.coordinator.api.async_command(self._backend_entity_id, payload)
-            self._apply_optimistic_state(payload)
-            self._schedule_refresh()
-            return
-
-        if self.backend_state.get("local_available"):
-            await self._async_send_prefer_local(payload, local_command)
-        else:
-            await self._async_send_first_success(payload, local_command)
-        self._apply_optimistic_state(payload)
-        self._schedule_refresh()
-
-    async def _async_send_first_success(
-        self,
-        cloud_payload: dict[str, Any],
-        local_command: dict[str, Any],
-    ) -> None:
-        """Run cloud and local commands in parallel and return on first success."""
-        tasks = {
-            self.hass.async_create_task(
-                self.coordinator.api.async_command(
-                    self._backend_entity_id,
-                    cloud_payload,
-                )
-            ),
-            self.hass.async_create_task(
-                self.coordinator.api.async_local_command(**local_command)
-            ),
-        }
-        errors: list[BaseException] = []
-
-        while tasks:
-            done, pending = await asyncio.wait(
-                tasks,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in done:
-                try:
-                    await task
-                except Exception as err:
-                    errors.append(err)
-                    continue
-
-                for pending_task in pending:
-                    pending_task.cancel()
-                for pending_task in pending:
-                    with suppress(asyncio.CancelledError, Exception):
-                        await pending_task
-                return
-
-            tasks = pending
-
-        if errors:
-            raise errors[0]
-
-    async def _async_send_prefer_local(
-        self,
-        cloud_payload: dict[str, Any],
-        local_command: dict[str, Any],
-    ) -> None:
-        """Run cloud and local commands together, but require local when reachable."""
-        cloud_task = self.hass.async_create_task(
-            self.coordinator.api.async_command(
-                self._backend_entity_id,
-                cloud_payload,
+        cloud_available = bool(
+            self.backend_state.get(
+                "cloud_available", self.backend_state.get("available", True)
             )
         )
-        local_task = self.hass.async_create_task(
-            self.coordinator.api.async_local_command(**local_command)
-        )
-
-        cloud_error: BaseException | None = None
+        mode = "cloud"
         try:
-            await local_task
-        except Exception as local_error:
-            try:
-                await cloud_task
-            except Exception as err:
-                cloud_error = err
-            if cloud_error is not None:
-                raise local_error from cloud_error
-        else:
-            if not cloud_task.done():
-                cloud_task.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await cloud_task
+            if cloud_available or local_command is None:
+                try:
+                    await self.coordinator.api.async_command(
+                        self._backend_entity_id, payload
+                    )
+                except (EvolvIOTCommandUnavailable, EvolvIOTAuthError):
+                    if local_command is None:
+                        raise
+                    mode = await self.coordinator.api.async_local_command(
+                        **local_command
+                    )
+            else:
+                mode = await self.coordinator.api.async_local_command(**local_command)
+        except EvolvIOTCommandUncertain:
+            # Refresh rather than replay: the original command may have executed.
+            await self.coordinator.async_request_refresh()
+            raise
+        self._apply_optimistic_state(payload)
+        state = self.coordinator.states.get(self._backend_entity_id)
+        if state is not None:
+            state["cloud_available"] = mode == "cloud"
+            if mode != "cloud":
+                state["local_available"] = True
+                state["local_transport"] = mode
+            self.async_write_ha_state()
+        self._schedule_refresh()
 
     def _local_command(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         """Build local encrypted command details when entity metadata supports it."""
@@ -217,6 +172,7 @@ class EvolvIOTEntity(CoordinatorEntity[EvolvIOTDataUpdateCoordinator]):
             "device_secret": device_secret,
             "switch_name": switch_name,
             "value": value,
+            "host": local_device_host(device, local_control),
         }
 
     def _local_command_value(self, payload: dict[str, Any]) -> int | None:
@@ -264,7 +220,10 @@ class EvolvIOTEntity(CoordinatorEntity[EvolvIOTDataUpdateCoordinator]):
 
     def _schedule_refresh(self) -> None:
         """Refresh after a short delay to avoid rendering stale command state."""
-        if self.coordinator.api.websocket_connected:
+        if (
+            self.backend_state.get("cloud_available")
+            and self.coordinator.api.websocket_connected
+        ):
             return
         self.hass.async_create_task(self._async_delayed_refresh())
 

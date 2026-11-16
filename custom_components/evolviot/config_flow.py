@@ -47,7 +47,9 @@ def _connection_schema(user_input: dict[str, Any] | None = None) -> vol.Schema:
                 CONF_API_BASE_URL,
                 default=values.get(CONF_API_BASE_URL, DEFAULT_API_BASE_URL),
             ): str,
-            vol.Optional(CONF_VERIFY_SSL, default=values.get(CONF_VERIFY_SSL, True)): bool,
+            vol.Optional(
+                CONF_VERIFY_SSL, default=values.get(CONF_VERIFY_SSL, True)
+            ): bool,
         }
     )
 
@@ -94,9 +96,7 @@ class EvolvIOTConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             verify_ssl=self._verify_ssl,
         )
 
-    async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
-    ):
+    async def async_step_user(self, user_input: dict[str, Any] | None = None):
         """Start app-based pairing immediately."""
         errors: dict[str, str] = {}
 
@@ -122,9 +122,7 @@ class EvolvIOTConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return await self.async_step_pair()
 
-    async def async_step_pair(
-        self, user_input: dict[str, Any] | None = None
-    ):
+    async def async_step_pair(self, user_input: dict[str, Any] | None = None):
         """Show pairing details while polling for app approval."""
         errors: dict[str, str] = {}
 
@@ -244,7 +242,9 @@ class EvolvIOTConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def _pair_description_placeholders(self) -> dict[str, str]:
         """Return placeholders shown in the pairing form step."""
         return {
-            "qr_image_url": _qr_code_data_uri(str(self._pairing.get("qr_payload") or "")),
+            "qr_image_url": _qr_code_data_uri(
+                str(self._pairing.get("qr_payload") or "")
+            ),
             "user_code": str(self._pairing.get("user_code") or ""),
             "expires_in": str(self._pairing.get("expires_in") or ""),
         }
@@ -262,23 +262,24 @@ class EvolvIOTOptionsFlow(config_entries.OptionsFlow):
     """Handle EvolvIOT options updates."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
+        self._entry = config_entry
 
-    async def async_step_init(
-        self, user_input: dict[str, Any] | None = None
-    ):
+    async def async_step_init(self, user_input: dict[str, Any] | None = None):
         """Update stored connection details."""
         if user_input is not None:
             data = {
-                **self.config_entry.data,
-                CONF_API_BASE_URL: normalize_api_base_url(user_input[CONF_API_BASE_URL]),
+                **self._entry.data,
+                CONF_API_BASE_URL: normalize_api_base_url(
+                    user_input[CONF_API_BASE_URL]
+                ),
                 CONF_VERIFY_SSL: bool(user_input.get(CONF_VERIFY_SSL, True)),
             }
-            self.hass.config_entries.async_update_entry(self.config_entry, data=data)
-            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+            data.pop("local_hosts", None)
+            self.hass.config_entries.async_update_entry(self._entry, data=data)
+            await self.hass.config_entries.async_reload(self._entry.entry_id)
             return self.async_create_entry(title="", data={})
 
         return self.async_show_form(
             step_id="init",
-            data_schema=_connection_schema(dict(self.config_entry.data)),
+            data_schema=_connection_schema(dict(self._entry.data)),
         )

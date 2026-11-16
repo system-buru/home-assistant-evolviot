@@ -216,3 +216,24 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local agent settings and Home Assistant test instances
+/.agents/
+/.codex/
+/.aws/
+/.ha-test/
+/.homeassistant/
+/config/
+.env.*
+!.env.example
+**/.storage/
+**/secrets.yaml
+**/home-assistant.log*
+**/home-assistant_v2.db*
+
+# Accidental nested link created when linking the integration into a test instance
+/custom_components/evolviot/evolviot
+
+# Operating system metadata
+.DS_Store
+Thumbs.db

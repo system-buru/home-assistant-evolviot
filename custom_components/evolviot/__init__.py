@@ -7,6 +7,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_track_time_interval
 
 from .api import EvolvIOTApi, normalize_api_base_url
 from .const import (
@@ -19,6 +20,7 @@ from .const import (
     DATA_API,
     DATA_COORDINATOR,
     DATA_KNOWN_ENTITIES,
+    DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     PLATFORMS,
 )
@@ -51,8 +53,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         token_update_callback=async_token_updated,
     )
     coordinator = EvolvIOTDataUpdateCoordinator(hass, api, entry.entry_id)
-    await coordinator.async_load_cache()
-    await coordinator.async_config_entry_first_refresh()
+    try:
+        await coordinator.async_load_cache()
+        await coordinator.async_config_entry_first_refresh()
+    except BaseException:
+        await api.async_close()
+        raise
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         DATA_API: api,
@@ -61,6 +67,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass, coordinator.async_periodic_refresh, DEFAULT_SCAN_INTERVAL
+        )
+    )
     return True
 
 
